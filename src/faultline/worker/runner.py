@@ -18,7 +18,7 @@ from langgraph.types import Command
 from faultline.config import Settings
 from faultline.core.alerts import Alert, TimeWindow
 from faultline.core.schemas import ApprovalDecision, Status
-from faultline.core.state import initial_state
+from faultline.core.state import SCHEMA_VERSION, initial_state
 from faultline.gateway.policy import TokenSigner
 from faultline.gateway.registry import ToolRegistry
 from faultline.logging import get_logger
@@ -26,6 +26,7 @@ from faultline.ports import Bus, EventPublisher, Message, ProgressEvent, Reposit
 from faultline.worker.graph import build_graph
 from faultline.worker.models import build_router
 from faultline.worker.nodes import InvestigationNodes, fresh_budget
+from faultline.worker.prompts import PROMPT_VERSION
 from faultline.worker.serde import make_serializer
 
 log = get_logger(__name__)
@@ -50,7 +51,13 @@ class InvestigationWorker:
         self._publisher = publisher
         self._signer = TokenSigner(settings.gateway_signing_key)
         self._nodes = InvestigationNodes(
-            router=build_router(settings.model_provider),
+            router=build_router(
+                provider=settings.model_provider,
+                frontier=settings.model_frontier,
+                small=settings.model_small,
+                frontier_fallback=settings.model_frontier_fallback,
+                small_fallback=settings.model_small_fallback,
+            ),
             registry=registry,
             publisher=publisher,
             signer=self._signer,
@@ -141,8 +148,20 @@ class InvestigationWorker:
                 self._settings.budget_deadline_seconds,
             ),
         )
-        await self._repo.audit(incident_id, "system", "investigation_started", {})
+        # Recorded per investigation so any past result can be reproduced: which
+        # prompts, which models, which state schema produced it.
+        await self._repo.audit(incident_id, "system", "investigation_started", self.versions())
         return await self._drive(incident_id, tenant_id, state)
+
+    def versions(self) -> dict[str, Any]:
+        """The provenance stamp attached to every investigation."""
+        return {
+            "prompt_version": PROMPT_VERSION,
+            "state_schema_version": SCHEMA_VERSION,
+            "model_provider": self._settings.model_provider,
+            "model_frontier": self._settings.model_frontier,
+            "model_small": self._settings.model_small,
+        }
 
     async def resume(self, incident_id: str, tenant_id: str) -> dict[str, Any]:
         """Continue a graph parked at the approval interrupt."""

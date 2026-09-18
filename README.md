@@ -3,10 +3,11 @@
 Agentic root-cause investigation for Kubernetes microservices. An alert comes in;
 a verified, cited RCA report goes out; any remediation waits for a human.
 
-> **Status: walking skeleton.** One thin path runs end to end — webhook, dedupe,
-> queue, LangGraph investigation, verification, approval, execution, recovery
-> check. The infrastructure is real; the model tier and the telemetry backend are
-> deterministic stubs. See [What is not built yet](#what-is-not-built-yet).
+> **Status: early.** One thin path runs end to end — webhook, dedupe, queue,
+> LangGraph investigation, verification, approval, execution, recovery check —
+> and there are two model tiers: a deterministic stub (what CI runs on) and a
+> real Anthropic tier. The telemetry backend is still a replayable fixture.
+> See [What is not built yet](#what-is-not-built-yet).
 
 ```bash
 make setup && make demo
@@ -239,17 +240,65 @@ roughly six months; this is the foundation.
 | Webhook → queue → graph → report → approval → execute | **Done**, tested end to end |
 | Queue semantics, outbox, audit chain, RBAC, tenant isolation | **Done**, tested |
 | Verification, budgets, abstention, injection quarantine | **Done**, tested |
-| Model tier | **Stub.** Deterministic logic mirroring each prompt's job. `worker/models.py` has the extension point |
+| Model tier — stub | **Done.** Deterministic logic mirroring each prompt's job; CI runs on it, no API key |
+| Model tier — Anthropic | **Written, not yet run live.** Structured output, cache-stable prompts, real cost accounting, tier fallback. Tested against a fake client; see the caveat below |
 | Telemetry backends | **Replayable scenarios.** Prometheus/Loki/Tempo/Kubernetes adapters not written |
 | Hybrid retrieval (BM25 + pgvector, RRF, reranking) | **Schema only.** `search_knowledge` abstains and logs a knowledge gap |
 | Fault-injection benchmark, capsules, ablations | **Not started.** The scenario format is its seed |
 | Helm, KEDA, OpenTelemetry instrumentation | **Not started** |
 | Web UI | **Not started.** SSE endpoint is live |
 
-The stub model tier is deliberate. It means the queue, the verification, the
-approval gate and the recovery loop are all under test in CI without an API key
-— and when a real provider lands, what changes is the quality of the judgment,
-not the shape of the graph.
+Keeping the stub tier is deliberate. It means the queue, the verification, the
+approval gate and the recovery loop stay under test in CI without an API key.
+Switching tiers changes the quality of the judgment, not the shape of the graph.
+
+**The Anthropic tier has never made a live API call.** It was built without
+credentials available, so every layer up to the wire is tested against a fake
+client — request shape, cache placement, schema, adaptation, pricing, refusal
+and truncation handling — and the network call itself is not. Treat the first
+live run as unverified.
+
+## The model tier
+
+Two tiers behind one `Model` protocol, routed per task — a small model for
+triage, query writing, entailment and summaries; a frontier model for
+hypothesize, plan, assess and synthesize.
+
+```bash
+export FAULTLINE_MODEL_PROVIDER=anthropic
+export ANTHROPIC_API_KEY=...        # or: ant auth login
+make demo
+```
+
+Four things that are not obvious from the diff:
+
+**Model output is never domain state directly.** The model parses into narrow
+schemas in [`worker/responses.py`](src/faultline/worker/responses.py), and
+[`worker/adapt.py`](src/faultline/worker/adapt.py) is the single place those
+become domain objects. The narrowness is the guardrail: `tool` is an enum, so
+the model cannot invent a tool; arguments are typed fields, so it cannot invent
+an argument; and the synthesis schema has no `proposed_actions` field at all, so
+it cannot suggest a command even if asked to.
+
+**The system prompt is byte-stable.** Prompt caching is a prefix match, so
+anything per-incident in the system block would invalidate the cache on every
+request. Everything volatile lives in the user message, and a test asserts two
+different incidents produce an identical system block. Cache reads are billed at
+a tenth of the input rate, which is the whole reason that discipline pays.
+
+**Cost accounting is real.** [`price()`](src/faultline/worker/anthropic_model.py)
+reads usage off the API response and charges cached reads and writes at their own
+rates. An unpriced model raises rather than billing zero — a silent zero would
+make every budget ceiling in `core/budget.py` meaningless.
+
+**Evidence is fenced as data.** Log lines flow straight into these prompts, so
+each one arrives wrapped in a delimiter with its id, and flagged content carries
+an explicit quarantine notice. This is defense in depth, not the defense — the
+real guarantees are that the model cannot reach a write tool and that `verify`
+checks every claim against the ledger.
+
+Each investigation records its prompt version, model ids and state schema version
+in the audit log, so any past result can be traced back to what produced it.
 
 ## Decisions
 
@@ -261,6 +310,7 @@ Recorded in [`docs/adr/`](docs/adr/):
 4. [LangGraph for the investigation loop](docs/adr/0004-langgraph-for-the-investigation-loop.md)
 5. [Compress telemetry at the source](docs/adr/0005-compress-telemetry-at-the-source.md)
 6. [Human approval is the feature](docs/adr/0006-human-approval-is-the-feature.md)
+7. [Two model tiers behind one protocol](docs/adr/0007-two-model-tiers-behind-one-protocol.md)
 
 ## License
 

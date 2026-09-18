@@ -59,8 +59,13 @@ class Settings(BaseSettings):
 
     # Models. The skeleton ships a deterministic stub router; see worker/models.py.
     model_provider: Literal["stub", "anthropic"] = "stub"
+    # Bare ids, never date-suffixed: a suffixed id is rejected as an unknown model.
     model_frontier: str = "claude-opus-5"
-    model_small: str = "claude-haiku-4-5-20251001"
+    model_small: str = "claude-haiku-4-5"
+    # The second provider for each tier, so one provider's outage is a slower
+    # investigation rather than none. Empty disables failover.
+    model_frontier_fallback: str = "claude-sonnet-5"
+    model_small_fallback: str = ""
 
     @property
     def is_live(self) -> bool:

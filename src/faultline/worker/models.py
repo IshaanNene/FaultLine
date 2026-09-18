@@ -506,12 +506,40 @@ def _significant_tokens(text: str) -> list[str]:
     return [w for w in words if w not in stop]
 
 
-def build_router(provider: str = "stub") -> ModelRouter:
+def build_router(
+    provider: str = "stub",
+    frontier: str = "claude-opus-5",
+    small: str = "claude-haiku-4-5",
+    frontier_fallback: str = "",
+    small_fallback: str = "",
+    client: object | None = None,
+) -> ModelRouter:
+    """Build the tiered router.
+
+    `stub` is the default and what CI runs on: deterministic, free, no API key.
+    `anthropic` wires real models, with an optional second model per tier that
+    the router falls back to when the first one's breaker opens.
+    """
     if provider == "stub":
         stub = StubModel()
         return ModelRouter({"small": [stub], "frontier": [stub]})
-    raise NotImplementedError(
-        f"provider {provider!r} is not wired yet; the Anthropic adapter implements "
-        "Model.invoke by rendering each Task to a prompt and requesting the matching "
-        "Pydantic schema as structured output"
-    )
+
+    if provider == "anthropic":
+        # Imported here so the stub path never pays for the SDK import, and so a
+        # missing dependency surfaces only when someone actually asks for live models.
+        from faultline.worker.anthropic_model import AnthropicModel
+
+        def tier(primary: str, fallback: str) -> list[Model]:
+            models: list[Model] = [AnthropicModel(primary, client=client)]
+            if fallback and fallback != primary:
+                models.append(AnthropicModel(fallback, client=client))
+            return models
+
+        return ModelRouter(
+            {
+                "frontier": tier(frontier, frontier_fallback),
+                "small": tier(small, small_fallback),
+            }
+        )
+
+    raise ValueError(f"unknown model provider {provider!r}; expected 'stub' or 'anthropic'")

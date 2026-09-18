@@ -46,7 +46,10 @@ packages = ["src/faultline"]
 [tool.pytest.ini_options]
 # src-layout without an editable install: Desktop is iCloud-synced and editable
 # installs break there, so tests import straight from src/.
-pythonpath = ["src"]
+# "." is the repo root, so `from tests.conftest import ...` resolves whether
+# pytest is invoked as `pytest` or as `python -m pytest` (only the latter puts
+# the working directory on sys.path).
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-q --strict-markers"

@@ -23,9 +23,16 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+          cache-dependency-glob: pyproject.toml
 
+      # A venv, not --system: the runner's Python is externally managed (PEP 668)
+      # and refuses system installs. Putting .venv/bin on PATH makes the steps
+      # below run exactly what `make check` runs locally.
       - name: Install dependencies
-        run: uv pip install --system --all-extras -r pyproject.toml
+        run: |
+          uv venv --python 3.12
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          uv pip install --all-extras -r pyproject.toml
 
       - name: Lint
         run: |

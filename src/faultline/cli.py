@@ -41,6 +41,18 @@ def main(argv: list[str] | None = None) -> int:
     demo.add_argument("--approve", action="store_true", help="approve the proposed action")
     demo.add_argument("--json", action="store_true", help="emit the RCA report as JSON")
 
+    ev = sub.add_parser("eval", help="score the agent against the capsule benchmark")
+    ev.add_argument(
+        "--provider",
+        action="append",
+        default=None,
+        help="repeatable: stub, anthropic, ollama (default: stub)",
+    )
+    ev.add_argument("--capsule", action="append", default=None, help="repeatable capsule name")
+    ev.add_argument("--min-accuracy", type=float, default=None, help="fail below this (CI gate)")
+    ev.add_argument("--max-wrong", type=float, default=0.0, help="fail above this (CI gate)")
+    ev.add_argument("--export", type=str, default=None, help="write capsules as JSON to this dir")
+
     args = parser.parse_args(argv)
     settings = get_settings()
     configure_logging(settings.log_level, json_output=settings.environment != "local")
@@ -66,6 +78,16 @@ def main(argv: list[str] | None = None) -> int:
             asyncio.run(_run_worker(args.name))
         case "demo":
             return asyncio.run(_run_demo(approve=args.approve, as_json=args.json))
+        case "eval":
+            return asyncio.run(
+                _run_eval(
+                    providers=args.provider or ["stub"],
+                    capsule_names=args.capsule,
+                    min_accuracy=args.min_accuracy,
+                    max_wrong=args.max_wrong,
+                    export_dir=args.export,
+                )
+            )
     return 0
 
 
@@ -102,6 +124,48 @@ async def _run_demo(approve: bool, as_json: bool) -> int:
     if as_json:
         json.dump(result, sys.stdout, indent=2, default=str)
         sys.stdout.write("\n")
+    return 0
+
+
+async def _run_eval(
+    providers: list[str],
+    capsule_names: list[str] | None,
+    min_accuracy: float | None,
+    max_wrong: float,
+    export_dir: str | None,
+) -> int:
+    from pathlib import Path
+
+    from faultline.eval.capsule import builtin, builtins
+    from faultline.eval.runner import RegressionFailure, assert_no_regression, run_suite
+    from faultline.eval.scoring import render, render_detail
+
+    capsules = [builtin(n) for n in capsule_names] if capsule_names else builtins()
+
+    if export_dir:
+        target = Path(export_dir)
+        for capsule in capsules:
+            written = capsule.save(target / f"{capsule.name}.json")
+            print(f"wrote {written}")
+        return 0
+
+    cards = await run_suite(providers, capsules=capsules)
+    print(render(cards))
+    print(render_detail(cards))
+
+    if min_accuracy is None:
+        return 0
+    failures = []
+    for card in cards:
+        try:
+            assert_no_regression(card, min_accuracy=min_accuracy, max_wrong=max_wrong)
+        except RegressionFailure as exc:
+            failures.append(str(exc))
+    if failures:
+        print("\nREGRESSION:")
+        for failure in failures:
+            print(f"  {failure}")
+        return 1
     return 0
 
 

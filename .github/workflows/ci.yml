@@ -46,8 +46,7 @@ jobs:
         run: pytest --cov=faultline --cov-report=term-missing --cov-report=xml
 
       # The walking skeleton is a CI gate, not a demo script: if the agent stops
-      # finding the injected fault, the build fails. This is the seam the
-      # fault-injection benchmark plugs into once incident capsules land.
+      # finding the injected fault, the build fails.
       - name: End-to-end investigation
         run: |
           python -c "
@@ -56,6 +55,13 @@ jobs:
           assert_found_root_cause(asyncio.run(run_demo(approve=True, verbose=True)))
           print('root cause identified and remediated')
           "
+
+      # The benchmark as a regression gate. Two floors, because they fail for
+      # different reasons: accuracy dropping means the investigation got weaker,
+      # while a non-zero wrong rate means it started asserting things -- the more
+      # dangerous regression, so it has zero tolerance.
+      - name: Capsule benchmark
+        run: python -m faultline.cli eval --min-accuracy 0.5 --max-wrong 0.0
 
       - uses: actions/upload-artifact@v4
         if: always()

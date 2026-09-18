@@ -248,7 +248,8 @@ roughly six months; this is the foundation.
 | Model tier — Ollama | **Done and exercised.** Local models via constrained decoding; a full investigation has run end to end on `llama3.1:8b` |
 | Telemetry backends | **Replayable scenarios.** Prometheus/Loki/Tempo/Kubernetes adapters not written |
 | Hybrid retrieval (BM25 + pgvector, RRF, reranking) | **Schema only.** `search_knowledge` abstains and logs a knowledge gap |
-| Fault-injection benchmark, capsules, ablations | **Not started.** The scenario format is its seed |
+| Fault-injection benchmark | **Done.** 4 capsules across 3 fault families plus a no-fault case, ground-truth scoring, ablation runner, CI gate |
+| Capsule record/replay from a live cluster | **Not started.** The capsule format exists and round-trips; nothing records into it yet |
 | Helm, KEDA, OpenTelemetry instrumentation | **Not started** |
 | Web UI | **Not started.** SSE endpoint is live |
 
@@ -261,6 +262,68 @@ credentials available, so every layer up to the wire is tested against a fake
 client — request shape, cache placement, schema, adaptation, pricing, refusal
 and truncation handling — and the network call itself is not. Treat the first
 live run as unverified.
+
+## Evaluation
+
+The part everything else is in service of. Four capsules with known answers, run
+against every provider, scored automatically:
+
+```bash
+faultline eval --provider stub --provider ollama
+```
+
+```
+provider     n     correct wrong abstain   tokens~     med     cost
+--------------------------------------------------------------------------
+stub         n=4   correct=  50% wrong=   0% abstain=  25% tokens~      --    0.0s        --
+ollama       n=4   correct=  25% wrong=   0% abstain=  50% tokens~   9,822   73.3s  $0.0000
+```
+
+**Accuracy is not the headline — the wrong rate is.** A system that names a cause
+on every incident scores better on accuracy than one that abstains when the
+evidence is thin, and is far worse to put on call: a confident wrong root cause
+sends a responder to the wrong service mid-outage. So both rates are always
+reported, and abstaining counts as neither a hit nor a miss. That is what gives
+the graph a reason to prefer abstention over a guess.
+
+Neither tier has yet produced a confidently wrong answer. That is the property
+the verification layer exists for, and it is now a measured number rather than a
+claim.
+
+A benchmark needs to be losable to be worth anything, so:
+
+- **Four fault families, not four bad deploys.** A bad deploy is found by change
+  correlation; resource exhaustion has no deploy at all and the signal is in
+  Kubernetes state; a dependency failure has *nothing* changed anywhere, so the
+  only signal is that the anomalous service furthest down the call graph has
+  healthy dependencies of its own.
+- **One capsule where nothing is wrong.** A resolved warning, every metric in
+  baseline, no changes. Naming a cause here is scored `wrong`. Without it the
+  benchmark rewards guessing.
+- **The baseline does not ace it.** The stub scores 50%: it gets the bad deploy,
+  correctly declines the no-fault case, gets the right service but the wrong
+  fault class on resource exhaustion, and abstains on the dependency failure.
+  Headroom is the point.
+
+Capsules are **time-invariant**: timestamps are stored relative to the incident
+start and rebased on load. That matters because several of Faultline's own rules
+are temporal — the bystander filter demotes anomalies that predate the incident,
+the verifier rejects a cause that postdates its effect — so a capsule with
+month-old absolute timestamps would exercise different code than the one
+recorded. A test replays a capsule a year later and asserts the ranking is
+unchanged.
+
+The CI gate has two floors, because they fail for different reasons: accuracy
+dropping means the investigation got weaker, while a non-zero wrong rate means it
+started asserting things. The second has zero tolerance.
+
+```bash
+faultline eval --min-accuracy 0.5 --max-wrong 0.0    # runs in CI on every push
+```
+
+Synthetic usage is never printed as a measurement. The stub invents plausible
+per-call token and dollar figures so the budget arithmetic is exercised end to
+end; those appear as `--` rather than in a cost column beside a real provider's.
 
 ## The model tiers
 
@@ -371,6 +434,7 @@ Recorded in [`docs/adr/`](docs/adr/):
 6. [Human approval is the feature](docs/adr/0006-human-approval-is-the-feature.md)
 7. [Two model tiers behind one protocol](docs/adr/0007-two-model-tiers-behind-one-protocol.md)
 8. [A local model tier](docs/adr/0008-a-local-model-tier.md)
+9. [Scoring abstention as neither hit nor miss](docs/adr/0009-scoring-abstention-as-neither-hit-nor-miss.md)
 
 ## License
 

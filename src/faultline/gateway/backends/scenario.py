@@ -77,6 +77,23 @@ class WorkloadState:
 
 
 @dataclass(slots=True)
+class AlertSpec:
+    """The alert group that opens this incident.
+
+    Part of the scenario rather than the caller, because a capsule that does not
+    carry its own alerts is not replayable -- the investigation would start from
+    whatever the harness happened to hand it.
+    """
+
+    alertname: str
+    service: str
+    severity: str = "critical"
+    status: str = "firing"
+    minutes_ago: int = 12
+    summary: str = ""
+
+
+@dataclass(slots=True)
 class GroundTruth:
     """Only the evaluation harness reads this. The gateway never serves it."""
 
@@ -84,6 +101,10 @@ class GroundTruth:
     fault_class: FaultClass
     mechanism: str
     first_bad_at: datetime
+    # Some incidents have no cause to find. On those, a confident answer is the
+    # failure and abstaining is the pass -- without at least one such capsule the
+    # benchmark rewards a system that always guesses.
+    expect_abstention: bool = False
 
 
 @dataclass(slots=True)
@@ -91,6 +112,7 @@ class Scenario:
     name: str
     namespace: str
     incident_start: datetime
+    alerts: list[AlertSpec]
     topology: dict[str, list[str]]  # service -> downstream dependencies
     metrics: list[MetricSeries]
     logs: list[LogTemplate]
@@ -167,6 +189,24 @@ def bad_deploy_scenario(now: datetime | None = None) -> Scenario:
         name="bad_deploy_checkout",
         namespace="shop",
         incident_start=first_bad,
+        # frontend is what pages. checkout-service is what broke.
+        alerts=[
+            AlertSpec(
+                "HighErrorRate", "frontend", "critical", summary="frontend 5xx rate above 5% for 5m"
+            ),
+            AlertSpec(
+                "LatencySLOBurn",
+                "frontend",
+                "critical",
+                summary="frontend p99 latency budget burning fast",
+            ),
+            AlertSpec(
+                "HighErrorRate",
+                "checkout-service",
+                "warning",
+                summary="checkout-service 5xx rate above 5% for 5m",
+            ),
+        ],
         topology={
             "frontend": ["checkout-service", "product-catalog"],
             "checkout-service": ["payment-service", "cart-service"],
@@ -273,4 +313,236 @@ def bad_deploy_scenario(now: datetime | None = None) -> Scenario:
     )
 
 
-SCENARIOS = {"bad_deploy_checkout": bad_deploy_scenario}
+def resource_exhaustion_scenario(now: datetime | None = None) -> Scenario:
+    """cart-service is OOMKilled after its memory limit is lowered.
+
+    Discriminates differently from a bad deploy: there is no new image, the
+    signal is in Kubernetes state (restarts, last terminated reason) rather than
+    in a rollout. An agent that only knows how to blame deploys fails this one.
+    """
+    now = now or datetime.now(UTC)
+    change_at = now - timedelta(minutes=22)
+    first_bad = now - timedelta(minutes=18)
+
+    return Scenario(
+        name="resource_exhaustion_cart",
+        namespace="shop",
+        incident_start=first_bad,
+        alerts=[
+            AlertSpec(
+                "PodRestartingFrequently",
+                "cart-service",
+                "critical",
+                summary="cart-service restarting 6 times in 15m",
+            ),
+            AlertSpec("HighErrorRate", "frontend", "warning", summary="frontend 5xx rate elevated"),
+        ],
+        topology={
+            "frontend": ["checkout-service", "cart-service"],
+            "checkout-service": ["cart-service"],
+            "cart-service": ["redis"],
+            "redis": [],
+        },
+        metrics=[
+            MetricSeries("cart-service", "http_error_rate", 0.002, 0.240, "ratio", first_bad),
+            MetricSeries("cart-service", "memory_working_set_mb", 180, 498, "MB", first_bad),
+            MetricSeries("frontend", "http_error_rate", 0.002, 0.061, "ratio", first_bad),
+            MetricSeries("redis", "http_error_rate", 0.0010, 0.0011, "ratio", None),
+        ],
+        logs=[
+            LogTemplate(
+                "cart-service",
+                "ERROR",
+                "context deadline exceeded writing cart <*>",
+                1420,
+                2,
+                "context deadline exceeded writing cart c-8812",
+            ),
+            LogTemplate(
+                "frontend",
+                "ERROR",
+                "upstream cart-service returned <*>",
+                980,
+                4,
+                "upstream cart-service returned 503",
+            ),
+        ],
+        changes=[
+            ChangeEvent(
+                change_at,
+                "config",
+                "cart-service",
+                "cart-service memory limit lowered 512Mi -> 256Mi",
+                {"limit_before": "512Mi", "limit_after": "256Mi"},
+            ),
+        ],
+        workloads=[
+            WorkloadState(
+                "cart-service",
+                "shop",
+                4,
+                2,
+                6,
+                "ghcr.io/shop/cart-service:3.2.1",
+                last_terminated_reason="OOMKilled",
+                env_keys=["REDIS_URL", "CART_TTL_SECONDS"],
+            ),
+            WorkloadState("frontend", "shop", 4, 4, 0, "ghcr.io/shop/frontend:1.8.2"),
+        ],
+        ground_truth=GroundTruth(
+            root_cause_service="cart-service",
+            fault_class=FaultClass.RESOURCE_EXHAUSTION,
+            mechanism=(
+                "cart-service's memory limit was lowered below its working set, so pods "
+                "are OOMKilled and restart continuously; frontend surfaces the gaps as 503s."
+            ),
+            first_bad_at=first_bad,
+        ),
+    )
+
+
+def dependency_failure_scenario(now: datetime | None = None) -> Scenario:
+    """payment-service degrades with no change anywhere.
+
+    The hard case: nothing was deployed, nothing was configured. The only signal
+    is that the anomalous service furthest down the call graph has healthy
+    dependencies of its own. An agent anchored on "what changed" has nothing to
+    anchor to and has to reason about topology instead.
+    """
+    now = now or datetime.now(UTC)
+    first_bad = now - timedelta(minutes=9)
+
+    return Scenario(
+        name="dependency_failure_payment",
+        namespace="shop",
+        incident_start=first_bad,
+        alerts=[
+            AlertSpec(
+                "HighErrorRate",
+                "checkout-service",
+                "critical",
+                summary="checkout-service 5xx rate above 5% for 5m",
+            ),
+            AlertSpec(
+                "HighErrorRate", "frontend", "critical", summary="frontend 5xx rate above 5% for 5m"
+            ),
+        ],
+        topology={
+            "frontend": ["checkout-service"],
+            "checkout-service": ["payment-service", "cart-service"],
+            "payment-service": [],
+            "cart-service": [],
+        },
+        metrics=[
+            MetricSeries("payment-service", "http_error_rate", 0.001, 0.520, "ratio", first_bad),
+            MetricSeries("payment-service", "http_p99_latency_ms", 120, 8400, "ms", first_bad),
+            MetricSeries("checkout-service", "http_error_rate", 0.001, 0.310, "ratio", first_bad),
+            MetricSeries("frontend", "http_error_rate", 0.002, 0.140, "ratio", first_bad),
+            MetricSeries("cart-service", "http_error_rate", 0.0030, 0.0031, "ratio", None),
+        ],
+        logs=[
+            LogTemplate(
+                "payment-service",
+                "ERROR",
+                "upstream authorisation timeout after <*>ms",
+                3100,
+                1,
+                "upstream authorisation timeout after 8000ms",
+            ),
+            LogTemplate(
+                "checkout-service",
+                "ERROR",
+                "payment-service call failed: <*>",
+                2980,
+                3,
+                "payment-service call failed: context deadline exceeded",
+            ),
+        ],
+        # Deliberately empty: no deploy, no flag, no config edit.
+        changes=[],
+        workloads=[
+            WorkloadState(
+                "payment-service",
+                "shop",
+                3,
+                3,
+                0,
+                "ghcr.io/shop/payment-service:4.1.0",
+                env_keys=["PSP_ENDPOINT", "PSP_TIMEOUT_MS"],
+            ),
+            WorkloadState(
+                "checkout-service", "shop", 6, 6, 0, "ghcr.io/shop/checkout-service:2.13.4"
+            ),
+        ],
+        ground_truth=GroundTruth(
+            root_cause_service="payment-service",
+            fault_class=FaultClass.DEPENDENCY_FAILURE,
+            mechanism=(
+                "payment-service's downstream payment provider began timing out, so "
+                "checkout-service calls fail and frontend surfaces them to users. "
+                "Nothing was changed on our side."
+            ),
+            first_bad_at=first_bad,
+        ),
+    )
+
+
+def flapping_noise_scenario(now: datetime | None = None) -> Scenario:
+    """Nothing is wrong.
+
+    A low-severity alert that already resolved, every metric inside baseline, no
+    changes in the window. The correct outcome is to close it rather than invent
+    a cause -- and a benchmark without a capsule like this rewards guessing.
+    """
+    now = now or datetime.now(UTC)
+
+    return Scenario(
+        name="flapping_noise",
+        namespace="shop",
+        incident_start=now - timedelta(minutes=6),
+        alerts=[
+            AlertSpec(
+                "DiskUsageWarning",
+                "product-catalog",
+                "warning",
+                status="resolved",
+                minutes_ago=6,
+                summary="product-catalog disk above 70% (resolved)",
+            ),
+        ],
+        topology={"frontend": ["product-catalog"], "product-catalog": []},
+        metrics=[
+            MetricSeries("product-catalog", "http_error_rate", 0.0020, 0.0021, "ratio", None),
+            MetricSeries("product-catalog", "disk_used_ratio", 0.68, 0.71, "ratio", None),
+            MetricSeries("frontend", "http_error_rate", 0.0020, 0.0019, "ratio", None),
+        ],
+        logs=[
+            LogTemplate(
+                "product-catalog",
+                "INFO",
+                "compaction finished in <*>ms",
+                12,
+                11,
+                "compaction finished in 840ms",
+            ),
+        ],
+        changes=[],
+        workloads=[
+            WorkloadState("product-catalog", "shop", 2, 2, 0, "ghcr.io/shop/product-catalog:5.0.3"),
+        ],
+        ground_truth=GroundTruth(
+            root_cause_service="",
+            fault_class=FaultClass.UNKNOWN,
+            mechanism="No fault. A warning-level alert crossed its threshold briefly and resolved.",
+            first_bad_at=now - timedelta(minutes=6),
+            expect_abstention=True,
+        ),
+    )
+
+
+SCENARIOS = {
+    "bad_deploy_checkout": bad_deploy_scenario,
+    "resource_exhaustion_cart": resource_exhaustion_scenario,
+    "dependency_failure_payment": dependency_failure_scenario,
+    "flapping_noise": flapping_noise_scenario,
+}

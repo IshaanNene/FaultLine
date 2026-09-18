@@ -1,0 +1,84 @@
+# Local stack. Postgres and Redis are the only infrastructure Faultline needs:
+# one transactional store (incidents, checkpoints, outbox, audit, and the
+# retrieval corpus with both pgvector and BM25) and one queue.
+
+name: faultline
+
+services:
+  postgres:
+    # ParadeDB ships Postgres with pgvector and pg_search already in it, which is
+    # what lets hybrid retrieval live in the same database as the incident rows.
+    image: paradedb/paradedb:latest
+    environment:
+      POSTGRES_USER: faultline
+      POSTGRES_PASSWORD: faultline
+      POSTGRES_DB: faultline
+    ports: ["5432:5432"]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U faultline -d faultline"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["6379:6379"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    command: ["api"]
+    environment: &live_env
+      FAULTLINE_BACKEND: live
+      FAULTLINE_ENVIRONMENT: local
+      FAULTLINE_POSTGRES_DSN: postgresql://faultline:faultline@postgres:5432/faultline
+      FAULTLINE_REDIS_URL: redis://redis:6379/0
+      FAULTLINE_GATEWAY_URL: http://gateway:8081
+      FAULTLINE_GATEWAY_SIGNING_KEY: dev-only-not-a-secret
+    ports: ["8080:8080"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  worker:
+    build: .
+    command: ["worker"]
+    environment: *live_env
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    # The scaling signal is queue lag, not CPU. KEDA does this in Kubernetes.
+    deploy:
+      replicas: 2
+
+  gateway:
+    build: .
+    command: ["gateway"]
+    environment: *live_env
+    ports: ["8081:8081"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8081/healthz', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  postgres_data:
+  redis_data:

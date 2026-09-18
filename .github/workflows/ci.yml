@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONPATH: src
+  FAULTLINE_BACKEND: memory
+  FAULTLINE_MODEL_PROVIDER: stub
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv pip install --system --all-extras -r pyproject.toml
+
+      - name: Lint
+        run: |
+          ruff check src tests
+          ruff format --check src tests
+
+      - name: Type check
+        run: mypy
+
+      - name: Test
+        run: pytest --cov=faultline --cov-report=term-missing --cov-report=xml
+
+      # The walking skeleton is a CI gate, not a demo script: if the agent stops
+      # finding the injected fault, the build fails. This is the seam the
+      # fault-injection benchmark plugs into once incident capsules land.
+      - name: End-to-end investigation
+        run: |
+          python -c "
+          import asyncio
+          from faultline.demo import run_demo, assert_found_root_cause
+          assert_found_root_cause(asyncio.run(run_demo(approve=True, verbose=True)))
+          print('root cause identified and remediated')
+          "
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: coverage.xml
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: faultline:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test the image
+        run: docker run --rm faultline:ci demo --approve

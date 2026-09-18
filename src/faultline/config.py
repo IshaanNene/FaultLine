@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     correlation_window_seconds: int = 120
 
     # Models. The skeleton ships a deterministic stub router; see worker/models.py.
-    model_provider: Literal["stub", "anthropic"] = "stub"
+    model_provider: Literal["stub", "anthropic", "ollama"] = "stub"
     # Bare ids, never date-suffixed: a suffixed id is rejected as an unknown model.
     model_frontier: str = "claude-opus-5"
     model_small: str = "claude-haiku-4-5"
@@ -66,6 +66,12 @@ class Settings(BaseSettings):
     # investigation rather than none. Empty disables failover.
     model_frontier_fallback: str = "claude-sonnet-5"
     model_small_fallback: str = ""
+
+    # Ollama: local models, no API key, no per-token cost. The deadline rather
+    # than the dollar ceiling is what bounds an investigation on this tier.
+    ollama_host: str = "http://localhost:11434"
+    ollama_frontier: str = "llama3.1:8b"
+    ollama_small: str = "llama3.2:3b"
 
     @property
     def is_live(self) -> bool:

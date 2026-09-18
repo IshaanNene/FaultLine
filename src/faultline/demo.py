@@ -148,6 +148,25 @@ async def run_demo(approve: bool = True, verbose: bool = True) -> dict[str, Any]
                 "and quarantined",
             )
 
+        if not report["proposed_actions"]:
+            # Abstention is a designed outcome, not an error: when verification
+            # cannot stand the report up, there is nothing to approve and the
+            # incident escalates to a human with the evidence attached.
+            _say(
+                verbose,
+                "[4] No action proposed"
+                + (" (investigation abstained)" if report["abstained"] else "")
+                + " -- escalated to a human.",
+            )
+            for gap in report["evidence_gaps"]:
+                _say(verbose, f"       gap: {gap}")
+            return {
+                "incident_id": incident_id,
+                "report": report,
+                "status": detail["status"],
+                "audit_entries": len(repository.audit_log),
+            }
+
         if not approve:
             _say(verbose, "[4] Parked awaiting approval. Re-run with --approve to continue.")
             return {"incident_id": incident_id, "report": report, "status": detail["status"]}

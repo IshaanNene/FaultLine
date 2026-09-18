@@ -79,6 +79,18 @@ class ModelUnavailable(RuntimeError):
     """Every provider for a tier is out. The graph degrades rather than fails."""
 
 
+class ModelRefused(RuntimeError):
+    """The model declined the request. Not retryable on the same model."""
+
+
+class TruncatedResponse(RuntimeError):
+    """The response was cut off before the structured output completed.
+
+    Half a parsed report is worse than none: let the router try another
+    provider rather than adapting a partial object into state.
+    """
+
+
 class Model(Protocol):
     name: str
 
@@ -513,12 +525,18 @@ def build_router(
     frontier_fallback: str = "",
     small_fallback: str = "",
     client: object | None = None,
+    ollama_host: str = "http://localhost:11434",
 ) -> ModelRouter:
     """Build the tiered router.
 
-    `stub` is the default and what CI runs on: deterministic, free, no API key.
-    `anthropic` wires real models, with an optional second model per tier that
-    the router falls back to when the first one's breaker opens.
+    Three providers, one protocol, the same prompts and schemas:
+
+    - `stub`: deterministic, free, no API key. The default, and what CI runs on.
+    - `anthropic`: hosted models, billed per token.
+    - `ollama`: local models, no key and no per-token cost.
+
+    Keeping all three comparable on the same incidents is the point -- it is what
+    lets the evaluation harness ask whether a hosted model is worth its cost.
     """
     if provider == "stub":
         stub = StubModel()
@@ -542,4 +560,16 @@ def build_router(
             }
         )
 
-    raise ValueError(f"unknown model provider {provider!r}; expected 'stub' or 'anthropic'")
+    if provider == "ollama":
+        from faultline.worker.ollama_model import OllamaModel
+
+        return ModelRouter(
+            {
+                "frontier": [OllamaModel(frontier, host=ollama_host)],
+                "small": [OllamaModel(small, host=ollama_host)],
+            }
+        )
+
+    raise ValueError(
+        f"unknown model provider {provider!r}; expected 'stub', 'anthropic' or 'ollama'"
+    )

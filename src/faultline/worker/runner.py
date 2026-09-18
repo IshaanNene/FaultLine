@@ -51,13 +51,7 @@ class InvestigationWorker:
         self._publisher = publisher
         self._signer = TokenSigner(settings.gateway_signing_key)
         self._nodes = InvestigationNodes(
-            router=build_router(
-                provider=settings.model_provider,
-                frontier=settings.model_frontier,
-                small=settings.model_small,
-                frontier_fallback=settings.model_frontier_fallback,
-                small_fallback=settings.model_small_fallback,
-            ),
+            router=build_router(**_router_kwargs(settings)),
             registry=registry,
             publisher=publisher,
             signer=self._signer,
@@ -210,6 +204,25 @@ class InvestigationWorker:
             {"status": status.value, "budget": values["budget"].snapshot()},
         )
         return values
+
+
+def _router_kwargs(settings: Settings) -> dict[str, Any]:
+    """Model ids differ per provider, so the tier names are resolved here rather
+    than making every provider share one pair of settings."""
+    if settings.model_provider == "ollama":
+        return {
+            "provider": "ollama",
+            "frontier": settings.ollama_frontier,
+            "small": settings.ollama_small,
+            "ollama_host": settings.ollama_host,
+        }
+    return {
+        "provider": settings.model_provider,
+        "frontier": settings.model_frontier,
+        "small": settings.model_small,
+        "frontier_fallback": settings.model_frontier_fallback,
+        "small_fallback": settings.model_small_fallback,
+    }
 
 
 def make_registry(settings: Settings) -> ToolRegistry:

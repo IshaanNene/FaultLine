@@ -22,26 +22,15 @@ from __future__ import annotations
 from typing import Any
 
 import anthropic
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from faultline.logging import get_logger
-from faultline.worker import responses as r
 from faultline.worker.adapt import to_domain
-from faultline.worker.models import TIER, Task, Usage
+from faultline.worker.models import TIER, ModelRefused, Task, TruncatedResponse, Usage
 from faultline.worker.prompts import PROMPT_VERSION, SYSTEM, render_user
+from faultline.worker.responses import SCHEMA
 
 log = get_logger(__name__)
-
-# Which schema each task parses into.
-SCHEMA: dict[Task, type[BaseModel]] = {
-    Task.TRIAGE: r.TriageResponse,
-    Task.HYPOTHESIZE: r.HypothesesResponse,
-    Task.PLAN: r.PlanResponse,
-    Task.ASSESS: r.AssessResponse,
-    Task.SYNTHESIZE: r.SynthesisResponse,
-    Task.ENTAIL: r.EntailmentResponse,
-    Task.SUMMARIZE: r.SummaryResponse,
-}
 
 # Output ceilings. Generous enough not to truncate a report, small enough that a
 # runaway response cannot eat the incident's whole token budget.
@@ -146,14 +135,6 @@ class AnthropicModel:
         )
         # Domain objects out, so nodes cannot tell which tier answered.
         return to_domain(task, parsed, context), usage
-
-
-class ModelRefused(RuntimeError):
-    """The model declined. Not retryable on the same model."""
-
-
-class TruncatedResponse(RuntimeError):
-    """The response was cut off before the structured output completed."""
 
 
 def price(model: str, usage: Any) -> Usage:

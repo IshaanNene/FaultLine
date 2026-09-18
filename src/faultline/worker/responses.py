@@ -21,6 +21,7 @@ from enum import StrEnum
 from pydantic import BaseModel, Field
 
 from faultline.core.schemas import FaultClass, HypothesisStatus
+from faultline.worker.models import Task
 
 
 class ReadTool(StrEnum):
@@ -43,6 +44,20 @@ class ReadTool(StrEnum):
     FIND_SIMILAR_INCIDENTS = "find_similar_incidents"
 
 
+class SeverityLevel(StrEnum):
+    """Constrained rather than described.
+
+    This was a free string with a "P1, P2, P3 or P4" description until a local
+    model answered "critical". A description is a request; an enum is a
+    constraint, and the weaker the model the more that distinction matters.
+    """
+
+    P1 = "P1"
+    P2 = "P2"
+    P3 = "P3"
+    P4 = "P4"
+
+
 class TriageClassification(StrEnum):
     NOISE = "noise"
     DUPLICATE = "duplicate"
@@ -60,7 +75,7 @@ class AssessDecision(StrEnum):
 
 class TriageResponse(BaseModel):
     classification: TriageClassification
-    severity: str = Field(description="P1, P2, P3 or P4")
+    severity: SeverityLevel
     affected_services: list[str]
     summary: str = Field(description="One sentence an on-call engineer can act on.")
 
@@ -174,3 +189,16 @@ class EntailmentResponse(BaseModel):
 
 class SummaryResponse(BaseModel):
     summary: str
+
+
+# Which schema each task parses into. Provider-agnostic: every live tier asks
+# for the same structured output, so the graph cannot tell them apart.
+SCHEMA: dict[Task, type[BaseModel]] = {
+    Task.TRIAGE: TriageResponse,
+    Task.HYPOTHESIZE: HypothesesResponse,
+    Task.PLAN: PlanResponse,
+    Task.ASSESS: AssessResponse,
+    Task.SYNTHESIZE: SynthesisResponse,
+    Task.ENTAIL: EntailmentResponse,
+    Task.SUMMARIZE: SummaryResponse,
+}

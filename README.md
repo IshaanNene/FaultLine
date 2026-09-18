@@ -5,9 +5,9 @@ a verified, cited RCA report goes out; any remediation waits for a human.
 
 > **Status: early.** One thin path runs end to end — webhook, dedupe, queue,
 > LangGraph investigation, verification, approval, execution, recovery check —
-> and there are two model tiers: a deterministic stub (what CI runs on) and a
-> real Anthropic tier. The telemetry backend is still a replayable fixture.
-> See [What is not built yet](#what-is-not-built-yet).
+> and there are three model tiers: a deterministic stub (what CI runs on), a
+> hosted Anthropic tier, and a local Ollama tier. The telemetry backend is still
+> a replayable fixture. See [What is not built yet](#what-is-not-built-yet).
 
 ```bash
 make setup && make demo
@@ -242,6 +242,7 @@ roughly six months; this is the foundation.
 | Verification, budgets, abstention, injection quarantine | **Done**, tested |
 | Model tier — stub | **Done.** Deterministic logic mirroring each prompt's job; CI runs on it, no API key |
 | Model tier — Anthropic | **Written, not yet run live.** Structured output, cache-stable prompts, real cost accounting, tier fallback. Tested against a fake client; see the caveat below |
+| Model tier — Ollama | **Done and exercised.** Local models via constrained decoding; a full investigation has run end to end on `llama3.1:8b` |
 | Telemetry backends | **Replayable scenarios.** Prometheus/Loki/Tempo/Kubernetes adapters not written |
 | Hybrid retrieval (BM25 + pgvector, RRF, reranking) | **Schema only.** `search_knowledge` abstains and logs a knowledge gap |
 | Fault-injection benchmark, capsules, ablations | **Not started.** The scenario format is its seed |
@@ -258,17 +259,33 @@ client — request shape, cache placement, schema, adaptation, pricing, refusal
 and truncation handling — and the network call itself is not. Treat the first
 live run as unverified.
 
-## The model tier
+## The model tiers
 
-Two tiers behind one `Model` protocol, routed per task — a small model for
+Three providers behind one `Model` protocol, routed per task — a small model for
 triage, query writing, entailment and summaries; a frontier model for
 hypothesize, plan, assess and synthesize.
 
+| Provider | Models | Cost | Notes |
+| --- | --- | --- | --- |
+| `stub` | — | free | Deterministic. The default, and what CI runs on |
+| `anthropic` | Opus 5 / Haiku 4.5 | per token | Prompt caching, tier fallback. **Never run live** |
+| `ollama` | `llama3.1:8b` / `llama3.2:3b` | free | Local. Constrained decoding, no key |
+
 ```bash
-export FAULTLINE_MODEL_PROVIDER=anthropic
-export ANTHROPIC_API_KEY=...        # or: ant auth login
+# local, no API key
+ollama serve
+export FAULTLINE_MODEL_PROVIDER=ollama
+export FAULTLINE_BUDGET_DEADLINE_SECONDS=1800   # local inference is slow
+make demo
+
+# hosted
+export FAULTLINE_MODEL_PROVIDER=anthropic FAULTLINE_ANTHROPIC_API_KEY=...
 make demo
 ```
+
+All three use the **same prompts and the same response schemas**, so they are
+directly comparable on the same incident — which is precisely what the evaluation
+harness needs in order to ask whether a hosted model is worth its cost.
 
 Four things that are not obvious from the diff:
 
@@ -300,6 +317,23 @@ checks every claim against the ledger.
 Each investigation records its prompt version, model ids and state schema version
 in the audit log, so any past result can be traced back to what produced it.
 
+### What the local tier showed
+
+Running the investigation on `llama3.1:8b` was the first time any real model
+drove the graph, and it exercised the guardrails rather than the happy path:
+
+- It identified **checkout-service** as the root cause, not the louder
+  `frontend`, and rejected the frontend hypothesis with a citation.
+- Its drafted claims then **failed verification twice**, so the report degraded
+  to abstention with confidence scaled down — instead of asserting a
+  conclusion the evidence did not support.
+- With nothing verified to act on, no action was proposed and the incident
+  escalated to a human.
+
+That is the designed behaviour under a weak model, and it is the argument for
+building verification before building model quality. It also found two real bugs
+(below) that a stronger model would have hidden.
+
 ## Decisions
 
 Recorded in [`docs/adr/`](docs/adr/):
@@ -311,6 +345,7 @@ Recorded in [`docs/adr/`](docs/adr/):
 5. [Compress telemetry at the source](docs/adr/0005-compress-telemetry-at-the-source.md)
 6. [Human approval is the feature](docs/adr/0006-human-approval-is-the-feature.md)
 7. [Two model tiers behind one protocol](docs/adr/0007-two-model-tiers-behind-one-protocol.md)
+8. [A local model tier](docs/adr/0008-a-local-model-tier.md)
 
 ## License
 

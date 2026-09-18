@@ -53,9 +53,10 @@ packages = ["src/faultline"]
 pythonpath = ["src", "."]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "-q --strict-markers"
+addopts = "-q --strict-markers -m 'not ollama'"
 markers = [
   "integration: requires live Postgres and Redis (docker compose up -d)",
+  "ollama: requires a running Ollama daemon with the local models pulled",
 ]
 
 [tool.ruff]

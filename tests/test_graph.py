@@ -242,3 +242,94 @@ def test_a_failed_fix_still_stops_at_the_iteration_cap(nodes, budget) -> None:
     """The 'fix did not work' loop must be bounded like every other cycle."""
     state = _state(budget, recovered=False, iteration=4)
     assert nodes.route_after_recovery(state) == "report"
+
+
+# -- termination ---------------------------------------------------------
+
+
+class NeverConcludes:
+    """A model that always finds the evidence inconclusive.
+
+    Stands in for a weak model that keeps asking for one more check. The graph
+    must still terminate: without a working iteration cap the evidence loop is
+    bounded only by the token budget, which is hundreds of calls away.
+    """
+
+    name = "never-concludes"
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def invoke(self, task, context):  # type: ignore[no-untyped-def]
+        from faultline.core.schemas import Check, TriageVerdict
+        from faultline.worker.models import Usage
+
+        self.calls.append(task.value)
+        usage = Usage(tokens=10, usd=0.0, model=self.name)
+        match task.value:
+            case "triage":
+                return TriageVerdict(
+                    classification="actionable",
+                    severity="P1",
+                    affected_services=["frontend"],
+                    summary="s",
+                ), usage
+            case "hypothesize":
+                return [_hypothesis("frontend", HypothesisStatus.OPEN, [])], usage
+            case "plan":
+                return [
+                    Check(
+                        id="chk_x",
+                        tool="get_service_health",
+                        arguments={"service": "frontend"},
+                        rationale="r",
+                    )
+                ], usage
+            case "assess":
+                # Never supported, so route_after_assess always says "keep going".
+                return [
+                    h.model_copy(update={"status": HypothesisStatus.UNKNOWN})
+                    for h in context["hypotheses"]
+                ], usage
+            case _:
+                return "inconclusive", usage
+
+
+async def test_the_evidence_loop_terminates_at_the_iteration_cap(registry, signer) -> None:
+    """The regression that matters: assess routes back to plan_checks, never
+    through hypothesize, so the counter has to advance in plan_checks."""
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from faultline.core.budget import Budget
+    from faultline.worker.graph import build_graph
+    from faultline.worker.models import ModelRouter
+    from faultline.worker.serde import make_serializer
+
+    model = NeverConcludes()
+    nodes = InvestigationNodes(
+        router=ModelRouter({"small": [model], "frontier": [model]}),
+        registry=registry,
+        publisher=InMemoryEventPublisher(),
+        signer=signer,
+        max_iterations=2,
+    )
+    graph = build_graph(nodes, InMemorySaver(serde=make_serializer()))
+
+    # A budget far too large to be what stops this.
+    state = _state(Budget(max_tokens=10**9, max_usd=10**6, max_tool_calls=10**6))
+    config = {"configurable": {"thread_id": "inc_loop"}}
+
+    async for _mode, _chunk in graph.astream(state, config, stream_mode=["updates"]):
+        pass
+
+    values = (await graph.aget_state(config)).values
+    assert values["status"].is_terminal
+    assert values["iteration"] == 2
+    # Planning ran exactly max_iterations times, not until the tokens ran out.
+    assert model.calls.count("plan") == 2
+
+
+async def test_planning_advances_the_iteration_counter(nodes, budget) -> None:
+    state = _state(budget, hypotheses=[_hypothesis("frontend", HypothesisStatus.OPEN, [])])
+    update = await nodes.plan_checks(state)
+    assert update["iteration"] == 1

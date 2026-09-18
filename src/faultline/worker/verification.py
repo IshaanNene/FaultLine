@@ -24,6 +24,13 @@ from faultline.core.schemas import (
 
 # Numbers the model wrote into prose, checked back against the cited evidence.
 _NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
+
+# Identifier tokens -- ev_8f53057f10274c7d, hyp_1a2b, chk_9f0e. Models naturally
+# name the evidence they are citing inside the prose, and the digit runs inside a
+# hex id are not claimed figures. Without this, every inline citation produced a
+# fistful of spurious numeric-fidelity failures and pushed a sound report into
+# abstention.
+_IDENTIFIER = re.compile(r"\b[a-z]+_[0-9a-f]{6,}\b", re.IGNORECASE)
 NUMERIC_TOLERANCE = 0.02  # 2%, to survive rounding in a summary
 
 
@@ -178,7 +185,8 @@ def strip_failed_claims(report: RCAReport, verification: Verification) -> RCARep
 
 
 def _numbers(text: str) -> list[float]:
-    return [float(m) for m in _NUMBER.findall(text)]
+    """Figures a claim asserts, ignoring digits that are part of an identifier."""
+    return [float(m) for m in _NUMBER.findall(_IDENTIFIER.sub(" ", text))]
 
 
 def _numbers_in_evidence(claim: Claim, ledger: EvidenceLedger) -> list[float]:

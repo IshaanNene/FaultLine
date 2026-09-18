@@ -146,7 +146,10 @@ alert ──▶ triage ──noise/duplicate──▶ close
 
 Only two cycles exist — the evidence loop and the "fix did not work" loop — and
 both are bounded by an iteration cap and four independent budgets (tokens,
-dollars, tool calls, wall clock).
+dollars, tool calls, wall clock). The evidence loop routes back to `plan_checks`
+rather than `hypothesize`, so `plan_checks` is what advances the iteration
+counter; a test drives a model that never concludes to prove the loop still
+stops.
 
 **Concluding is a rule, not a vibe.** The leading hypothesis needs support from
 at least two *different* evidence kinds — a metric change point plus a deploy
@@ -323,16 +326,38 @@ Running the investigation on `llama3.1:8b` was the first time any real model
 drove the graph, and it exercised the guardrails rather than the happy path:
 
 - It identified **checkout-service** as the root cause, not the louder
-  `frontend`, and rejected the frontend hypothesis with a citation.
-- Its drafted claims then **failed verification twice**, so the report degraded
-  to abstention with confidence scaled down — instead of asserting a
-  conclusion the evidence did not support.
+  `frontend`, and rejected two rival hypotheses with cited reasoning.
+- Its drafted claims then **failed entailment** — statements like "the change
+  introduced a bug that caused the service to malfunction" are plausible but not
+  established by the evidence cited — so the report degraded to abstention with
+  confidence scaled down instead of asserting them.
 - With nothing verified to act on, no action was proposed and the incident
-  escalated to a human.
+  escalated to a human, with the dropped claims listed as gaps.
+
+A full local run takes about 90 seconds across 8 model calls.
 
 That is the designed behaviour under a weak model, and it is the argument for
-building verification before building model quality. It also found two real bugs
-(below) that a stronger model would have hidden.
+building verification before building model quality.
+
+Chasing *why* it abstained then found two further bugs, both in Faultline rather
+than the model:
+
+- **The numeric-fidelity check was firing on its own citations.** The model wrote
+  the evidence id inline — "checkout-service was changed (ev_8f53057f10274c7d)" —
+  and the check parsed digit runs out of the hex id, then reported `8`, `53057`
+  and `10274` as figures absent from the evidence. Eight of nine verification
+  failures were this. Inline citation is natural model behaviour, so any tier
+  would have hit it.
+- **The evidence loop was not bounded by the iteration cap.** `iteration` was
+  advanced in `hypothesize`, but the loop routes `assess → plan_checks` and never
+  passes through `hypothesize`, so the cap could not fire. The only real bound
+  was the 500k token ceiling — hundreds of model calls away, which is exactly the
+  40-minute run that surfaced it. A regression test now drives a model that never
+  concludes; without the fix it reaches LangGraph's recursion limit at 10,007
+  iterations.
+
+Neither is visible with a strong model that concludes on the first pass, which is
+the argument for keeping a weak tier around.
 
 ## Decisions
 

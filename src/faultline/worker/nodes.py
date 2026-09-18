@@ -188,10 +188,16 @@ class InvestigationNodes:
             node="hypothesize",
             hypotheses=[h.statement for h in new],
         )
-        return {"hypotheses": new, "iteration": state.get("iteration", 0) + 1}
+        return {"hypotheses": new}
 
     async def plan_checks(self, state: InvestigationState) -> dict[str, Any]:
-        """Pick the checks that best separate the leading hypotheses."""
+        """Pick the checks that best separate the leading hypotheses.
+
+        This node owns the iteration counter, because this is where the evidence
+        loop closes: assess routes back here, not to hypothesize. Counting in
+        hypothesize instead left the loop bounded only by the token budget, which
+        a model that never concludes can spend for a very long time.
+        """
         await self._emit(state["incident_id"], "node_started", node="plan_checks")
         already = {f"{e.tool}:{e.query}" for e in state.get("evidence", [])}
         checks: list[Check] = await self._invoke(
@@ -203,7 +209,7 @@ class InvestigationNodes:
                 "remaining_tool_calls": state["budget"].remaining_tool_calls(),
             },
         )
-        return {"pending_checks": checks}
+        return {"pending_checks": checks, "iteration": state.get("iteration", 0) + 1}
 
     async def run_checks(self, state: InvestigationState) -> dict[str, Any]:
         """Fan out the planned checks concurrently, with per-tool timeouts."""

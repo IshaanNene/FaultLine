@@ -7,6 +7,11 @@ on what the evidence said.
 Only two cycles exist -- the evidence loop (assess -> plan_checks) and the "fix
 did not work" loop (confirm_recovery -> hypothesize) -- and both are bounded by
 the iteration cap and the budget.
+
+The evidence loop routes back to `plan_checks`, not to `hypothesize`, which is
+why `plan_checks` owns the iteration counter. Counting in `hypothesize` instead
+left that loop bounded only by the token budget; `test_graph.py` drives a model
+that never concludes to keep that honest.
 """
 
 from __future__ import annotations

@@ -199,3 +199,42 @@ async def test_abstention_skips_the_entity_check_for_the_root_cause(abstained: b
         _always,
     )
     assert result.passed is abstained
+
+
+async def test_an_inline_evidence_id_is_not_read_as_a_claimed_figure() -> None:
+    """Models name the evidence they cite inside the prose. The digit runs in a
+    hex id are not figures, and treating them as such failed every such claim."""
+    ledger = EvidenceLedger([_evidence("ev_8f53057f10274c7d", "checkout-service deployed 2.14.0")])
+    result = await verify_report(
+        _report(
+            causal_chain=[
+                Claim(
+                    text="checkout-service was changed (ev_8f53057f10274c7d).",
+                    evidence_ids=["ev_8f53057f10274c7d"],
+                )
+            ]
+        ),
+        ledger,
+        SERVICES,
+        _always,
+    )
+    assert result.passed, result.summary
+
+
+async def test_a_fabricated_number_is_still_caught_alongside_an_inline_id() -> None:
+    """Ignoring identifier digits must not blind the check to real figures."""
+    ledger = EvidenceLedger([_evidence("ev_8f53057f10274c7d", "error rate rose to 18%")])
+    result = await verify_report(
+        _report(
+            causal_chain=[
+                Claim(
+                    text="error rate hit 94% (ev_8f53057f10274c7d).",
+                    evidence_ids=["ev_8f53057f10274c7d"],
+                )
+            ]
+        ),
+        ledger,
+        SERVICES,
+        _always,
+    )
+    assert any(f.check == "numeric_fidelity" and "94" in f.detail for f in result.failures)

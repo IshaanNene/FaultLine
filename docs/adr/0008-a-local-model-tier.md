@@ -40,15 +40,40 @@ same incident. The evaluation harness can therefore ask the question that matter
 — is a hosted model worth its cost on this workload? — rather than measuring three
 different prompt sets against each other.
 
-**A weak model is a better test of the guardrails than a strong one.** Two real
-bugs surfaced within minutes of the first local run and both were provider-
-agnostic. `TriageResponse.severity` was a free string with a "P1, P2, P3 or P4"
+**A weak model is a better test of the guardrails than a strong one.** Four real
+bugs surfaced from the first local runs, and all four were provider-agnostic. `TriageResponse.severity` was a free string with a "P1, P2, P3 or P4"
 description; the local model answered `"critical"`. A description is a request, an
 enum is a constraint, and the weaker the model the more that distinction matters —
 it is now an enum for every tier. Separately, the demo assumed a report always
 carries a proposed action and crashed with an `IndexError` when the investigation
 abstained, despite abstention being a designed outcome. A strong model would have
 hidden both.
+
+Chasing *why* the local report abstained then found two more, this time in
+Faultline's own logic rather than the schemas:
+
+The numeric-fidelity check was firing on its own citations. The model wrote the
+evidence id inline — "checkout-service was changed (ev_8f53057f10274c7d)" — and
+the check parsed digit runs out of the hex id, then reported `8`, `53057` and
+`10274` as figures absent from the evidence. Eight of nine verification failures
+in the diagnostic were this. Naming the evidence you are citing is natural model
+behaviour, so any tier would have hit it eventually; a weak model just got there
+first by citing verbosely.
+
+The evidence loop was not bounded by the iteration cap, despite this document and
+the module docstring both saying it was. `iteration` was advanced in
+`hypothesize`, but the loop routes `assess → plan_checks` and never passes back
+through `hypothesize`, so the cap could not fire. The only effective bound was the
+500k token ceiling — hundreds of model calls away. With the stub, which concludes
+on the first pass, the loop never ran twice; with a local model at roughly ten
+seconds a call, it ran for forty minutes before anyone noticed. The counter now
+advances in `plan_checks`, where the loop actually closes, and a regression test
+drives a model that never concludes: without the fix it reaches LangGraph's
+recursion limit at 10,007 iterations.
+
+That second one is the more instructive failure. It was not a model problem at
+all — it was a bound that had been asserted in three places and tested in none,
+and it took a slow, stubborn model to expose it.
 
 **The binding constraint changes.** On the hosted tier the dollar ceiling bounds
 an investigation; locally there is nothing to bill, so `usd` is genuinely zero and

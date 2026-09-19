@@ -15,6 +15,8 @@ prompt:
 
 from __future__ import annotations
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -65,8 +67,12 @@ class ToolError(RuntimeError):
 class ToolRegistry:
     """Dispatches tool calls against a backend and returns compressed evidence."""
 
-    def __init__(self, scenario: Scenario) -> None:
+    def __init__(self, scenario: Scenario, retriever: Any | None = None) -> None:
         self._scenario = scenario
+        # Optional so the gateway runs with no corpus at all: without a retriever
+        # search_knowledge abstains and logs a knowledge gap, which is the same
+        # thing it does when the corpus has nothing relevant.
+        self._retriever = retriever
 
     # -- dispatch ---------------------------------------------------------
 
@@ -285,14 +291,38 @@ class ToolRegistry:
         )
 
     def _tool_search_knowledge(self, args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-        # Placeholder until the hybrid BM25 + pgvector retriever lands. It abstains
-        # rather than inventing a runbook, which is the behavior the real one must
-        # keep when its rerank score falls below threshold.
         query = str(args.get("query", ""))
+        if self._retriever is None:
+            return (
+                f"No corpus is indexed, so no runbook could be retrieved for {query!r}.",
+                {"query": query, "hits": 0, "knowledge_gap": True},
+            )
+
+        result = _block_on(self._retriever.search(query, limit=3))
+
+        if result.abstained:
+            # Abstaining is the designed outcome, not a failure: a confidently
+            # irrelevant runbook invites the model to reason from the wrong
+            # procedure. The gap is recorded so runbook owners can see it.
+            return (
+                f"No runbook section was relevant to {query!r}. Knowledge gap recorded.",
+                {"query": query, "hits": 0, "knowledge_gap": True, "reason": result.reason},
+            )
+
+        sections = [
+            f"[{hit.citation}] (last verified {hit.section.document.last_verified or 'unknown'})\n"
+            f"{hit.section.text}"
+            for hit in result.hits
+        ]
         return (
-            f"No runbook section passed the relevance threshold for {query!r}. "
-            "Knowledge gap recorded.",
-            {"query": query, "hits": 0, "knowledge_gap": True},
+            f"{len(result.hits)} runbook section(s) for {query!r}:\n\n" + "\n\n".join(sections),
+            {
+                "query": query,
+                "hits": len(result.hits),
+                "knowledge_gap": False,
+                "citations": [hit.citation for hit in result.hits],
+                "confidence": round(result.confidence, 3),
+            },
         )
 
     def _tool_find_similar_incidents(self, args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -396,6 +426,23 @@ class ToolRegistry:
             f"executed {action.kind} on {action.target} "
             f"(approved by {grant.approver}, idempotency key {idempotency_key})"
         )
+
+
+def _block_on(coroutine: Any) -> Any:
+    """Run an async call from this synchronous tool surface, from any caller.
+
+    The graph reaches tools through `asyncio.to_thread`, so normally there is no
+    running loop here and `asyncio.run` is correct. But a direct caller -- a test,
+    a script, an async embedding of the gateway -- would be inside a loop, and
+    `asyncio.run` raises there. A tool that works from only one calling context is
+    a trap, so the loop-bound case gets its own thread.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coroutine)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coroutine).result()
 
 
 def _normalize_query(tool: str, arguments: dict[str, Any]) -> str:

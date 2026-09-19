@@ -37,6 +37,9 @@ log = get_logger(__name__)
 @dataclass(slots=True)
 class RunConfig:
     provider: str = "stub"
+    # Indexing the corpus costs seconds and the result is identical across
+    # capsules, so the caller builds it once and passes it in.
+    retriever: Any | None = None
     tenant_id: str = "eval"
     # Runs are scored on whether they found the answer, not on beating a clock,
     # so the deadline is generous. The token and tool ceilings still bind, and
@@ -55,7 +58,7 @@ async def run_capsule(capsule: Capsule, config: RunConfig) -> Result:
     )
     nodes = InvestigationNodes(
         router=build_router(**_router_kwargs(settings)),
-        registry=ToolRegistry(capsule.scenario),
+        registry=ToolRegistry(capsule.scenario, retriever=config.retriever),
         publisher=InMemoryEventPublisher(),
         signer=TokenSigner(settings.gateway_signing_key),
         max_iterations=config.max_iterations,
@@ -147,6 +150,7 @@ async def run_suite(
                 capsule,
                 RunConfig(
                     provider=provider,
+                    retriever=base.retriever,
                     tenant_id=base.tenant_id,
                     deadline_seconds=base.deadline_seconds,
                     max_iterations=base.max_iterations,

@@ -52,6 +52,14 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--min-accuracy", type=float, default=None, help="fail below this (CI gate)")
     ev.add_argument("--max-wrong", type=float, default=0.0, help="fail above this (CI gate)")
     ev.add_argument("--export", type=str, default=None, help="write capsules as JSON to this dir")
+    ev.add_argument(
+        "--no-corpus",
+        action="store_true",
+        help="run without retrieval, to measure what the corpus contributes",
+    )
+    ev.add_argument(
+        "--retrieval", action="store_true", help="score retrieval itself instead of the agent"
+    )
 
     args = parser.parse_args(argv)
     settings = get_settings()
@@ -86,6 +94,8 @@ def main(argv: list[str] | None = None) -> int:
                     min_accuracy=args.min_accuracy,
                     max_wrong=args.max_wrong,
                     export_dir=args.export,
+                    use_corpus=not args.no_corpus,
+                    retrieval_only=args.retrieval,
                 )
             )
     return 0
@@ -133,12 +143,35 @@ async def _run_eval(
     min_accuracy: float | None,
     max_wrong: float,
     export_dir: str | None,
+    use_corpus: bool = True,
+    retrieval_only: bool = False,
 ) -> int:
     from pathlib import Path
 
     from faultline.eval.capsule import builtin, builtins
-    from faultline.eval.runner import RegressionFailure, assert_no_regression, run_suite
+    from faultline.eval.runner import (
+        RegressionFailure,
+        RunConfig,
+        assert_no_regression,
+        run_suite,
+    )
     from faultline.eval.scoring import render, render_detail
+    from faultline.worker.runner import build_retriever_for
+
+    settings = get_settings()
+
+    if retrieval_only:
+        from faultline.retrieval.dense import OllamaEmbedder
+        from faultline.retrieval.evaluate import ablation
+        from faultline.retrieval.evaluate import render as render_retrieval
+
+        embedder = (
+            OllamaEmbedder(settings.embed_model, host=settings.ollama_host)
+            if settings.embed_provider == "ollama"
+            else None
+        )
+        print(render_retrieval(await ablation(embedder)))
+        return 0
 
     capsules = [builtin(n) for n in capsule_names] if capsule_names else builtins()
 
@@ -149,7 +182,8 @@ async def _run_eval(
             print(f"wrote {written}")
         return 0
 
-    cards = await run_suite(providers, capsules=capsules)
+    retriever = await build_retriever_for(settings) if use_corpus else None
+    cards = await run_suite(providers, capsules=capsules, config=RunConfig(retriever=retriever))
     print(render(cards))
     print(render_detail(cards))
 

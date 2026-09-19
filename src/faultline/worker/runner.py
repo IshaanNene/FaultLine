@@ -230,7 +230,55 @@ def make_registry(settings: Settings) -> ToolRegistry:
     paths read a scenario, which is also what the eval harness replays."""
     from faultline.gateway.backends.scenario import bad_deploy_scenario
 
-    return ToolRegistry(bad_deploy_scenario())
+    return ToolRegistry(bad_deploy_scenario(), retriever=build_retriever_sync(settings))
+
+
+async def build_retriever_for(settings: Settings) -> Any | None:
+    """Index the corpus once, or return None if there is none.
+
+    Retrieval failing is a degraded investigation, not a dead worker: the
+    knowledge tool abstains and every other evidence source still works. The
+    failure is logged at error level rather than debug, because a silently
+    missing corpus looks exactly like a corpus with nothing relevant in it.
+    """
+    from pathlib import Path
+
+    from faultline.retrieval.dense import OllamaEmbedder
+    from faultline.retrieval.ingest import build_retriever
+
+    root = Path(settings.corpus_path)
+    if not root.exists():
+        log.info("corpus_absent", path=str(root))
+        return None
+    embedder = (
+        OllamaEmbedder(settings.embed_model, host=settings.ollama_host)
+        if settings.embed_provider == "ollama"
+        else None
+    )
+    try:
+        return await build_retriever(root, embedder=embedder)
+    except Exception as exc:
+        log.error("corpus_index_failed", error=f"{type(exc).__name__}: {exc}")
+        return None
+
+
+def build_retriever_sync(settings: Settings) -> Any | None:
+    """For start-up paths that are not already inside an event loop.
+
+    Calling this from a running loop is a bug, not a degradation: it used to be
+    caught by the broad handler above and silently disabled retrieval for the
+    whole benchmark. Async callers use `build_retriever_for` directly.
+    """
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(build_retriever_for(settings))
+    raise RuntimeError(
+        "build_retriever_sync called from a running event loop; await "
+        "build_retriever_for(settings) instead"
+    )
 
 
 def approval_from(payload: dict[str, Any]) -> ApprovalDecision:

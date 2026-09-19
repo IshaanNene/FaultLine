@@ -73,6 +73,12 @@ class Settings(BaseSettings):
     ollama_frontier: str = "llama3.1:8b"
     ollama_small: str = "llama3.2:3b"
 
+    # Retrieval corpus. Absent is a supported state: search_knowledge abstains
+    # and logs a knowledge gap, exactly as it does when nothing is relevant.
+    corpus_path: str = "corpus"
+    embed_provider: Literal["none", "ollama"] = "ollama"
+    embed_model: str = "nomic-embed-text"
+
     @property
     def is_live(self) -> bool:
         return self.backend == "live"

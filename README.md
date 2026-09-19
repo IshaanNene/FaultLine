@@ -247,7 +247,8 @@ roughly six months; this is the foundation.
 | Model tier — Anthropic | **Written, not yet run live.** Structured output, cache-stable prompts, real cost accounting, tier fallback. Tested against a fake client; see the caveat below |
 | Model tier — Ollama | **Done and exercised.** Local models via constrained decoding; a full investigation has run end to end on `llama3.1:8b` |
 | Telemetry backends | **Replayable scenarios.** Prometheus/Loki/Tempo/Kubernetes adapters not written |
-| Hybrid retrieval (BM25 + pgvector, RRF, reranking) | **Schema only.** `search_knowledge` abstains and logs a knowledge gap |
+| Hybrid retrieval (BM25 + dense, RRF) | **Done and measured.** 8-document corpus, parent-child chunking, relevance-gated abstention, labelled query set. Measured R@3 93%, and measured *not* to help the agent yet — see below |
+| Reranking, query construction | **Not started.** The agent sends one naive query per investigation, which is the most likely reason retrieval has not paid off |
 | Fault-injection benchmark | **Done.** 4 capsules across 3 fault families plus a no-fault case, ground-truth scoring, ablation runner, CI gate |
 | Capsule record/replay from a live cluster | **Not started.** The capsule format exists and round-trips; nothing records into it yet |
 | Helm, KEDA, OpenTelemetry instrumentation | **Not started** |
@@ -324,6 +325,83 @@ faultline eval --min-accuracy 0.5 --max-wrong 0.0    # runs in CI on every push
 Synthetic usage is never printed as a measurement. The stub invents plausible
 per-call token and dollar figures so the budget arithmetic is exercised end to
 end; those appear as `--` rather than in a cost column beside a real provider's.
+
+## Retrieval
+
+Runbooks, postmortems and the service catalog, indexed with BM25 and dense
+embeddings and fused with reciprocal rank fusion. Only one of Faultline's four
+knowledge sources is classic document RAG and this is it — change events are a
+SQL query, live telemetry is a tool call, and similar incidents match on a
+structured signature.
+
+```bash
+faultline eval --retrieval        # score retrieval itself
+```
+
+```
+configuration    R@1    R@3    R@5   MRR   gate
+----------------------------------------------------------------------
+bm25 only      R@1=  67% R@3=  87% R@5=  93% MRR= 0.76 false-abstain=1 leaked=0
+dense only     R@1=  87% R@3= 100% R@5= 100% MRR= 0.93 false-abstain=0 leaked=0
+hybrid (rrf)   R@1=  87% R@3=  93% R@5= 100% MRR= 0.91 false-abstain=0 leaked=0
+```
+
+**Two results worth stating plainly, because both contradict what the design
+assumed.**
+
+*Dense alone beats hybrid on this corpus.* Hybrid ties it at R@1 and is slightly
+worse at R@3 and MRR. The corpus is prose-heavy and the labelled queries are
+paraphrases, which is dense retrieval's best case and BM25's worst; a corpus full
+of exact identifiers would likely flip it. Hybrid remains the default anyway, for
+a reason the table cannot show: BM25 needs no model, so it is what still works
+when the embedding service is down. The quality argument for it is currently not
+supported by measurement, and the README says so rather than assuming the result
+everyone expects.
+
+*Retrieval does not yet help the agent.* Running the capsule benchmark with and
+without the corpus:
+
+| ollama | correct | wrong | abstain | tokens | median |
+| --- | --- | --- | --- | --- | --- |
+| no corpus | 25% | 0% | 50% | 9,440 | 79.7s |
+| with corpus | 25% | 0% | **75%** | 13,084 | 86.7s |
+
+Same accuracy, *more* abstention, 39% more tokens, slower. The extra prose gave
+an 8B model more material to write plausible-but-unsupported claims from, and
+entailment rejected them. The most likely fix is not better retrieval but better
+*query construction*: the agent currently sends one naive query built from the
+triage summary, so the bad-deploy capsule retrieves the frontend runbook —
+correct for the query asked, and not the document that would have helped. Whether
+a frontier model converts runbooks into verified claims is untested.
+
+Four capsules and fifteen labelled queries is a small sample, and I wrote both
+the corpus and the queries, which is a real bias. These numbers are a starting
+point, not a finding.
+
+### How it works
+
+- **Parent-child chunks.** Children are indexed so a match is precise; the parent
+  section is returned so the model reads a complete thought. Matching and reading
+  want different sizes.
+- **A procedure is never split.** Half a rollback procedure is worse than none —
+  a responder who runs steps 1 to 3 of 5 has left a deployment at an unknown
+  revision mid-incident. A section containing numbered steps is kept whole even
+  when that exceeds the target chunk size.
+- **Identifiers are indexed whole and split.** `OOMKilled` becomes `oomkilled`,
+  `oom`, `killed`; `http_error_rate` becomes the metric name and its words. This
+  is why lexical search earns a place at all, and the obvious camel-case rule
+  misses the one token that matters most — the `OOM`/`Killed` boundary is capital
+  to capital.
+- **Deterministic context on every chunk.** Title, section path, service and
+  document type are prepended before indexing. It costs nothing and needs no
+  model, and it is the baseline an LLM-written context has to beat.
+- **The gate reads raw relevance, not fused ranks.** RRF confidence measures
+  whether the retrievers *agree*, which is a different question from whether
+  anything is relevant — dense search always returns a ranked list, so something
+  is always first. The first version of this gate returned a payment runbook for
+  "how do I bake bread" at 0.88 confidence. The floors (BM25 4.0, cosine 0.62)
+  sit in a measured gap: on-topic queries score 6.2–14.8 and 0.68–0.79, off-topic
+  ones 0.0–2.6 and 0.43–0.55.
 
 ## The model tiers
 
@@ -435,6 +513,7 @@ Recorded in [`docs/adr/`](docs/adr/):
 7. [Two model tiers behind one protocol](docs/adr/0007-two-model-tiers-behind-one-protocol.md)
 8. [A local model tier](docs/adr/0008-a-local-model-tier.md)
 9. [Scoring abstention as neither hit nor miss](docs/adr/0009-scoring-abstention-as-neither-hit-nor-miss.md)
+10. [Retrieval, measured before believed](docs/adr/0010-retrieval-measured-before-believed.md)
 
 ## License
 

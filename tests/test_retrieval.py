@@ -98,9 +98,7 @@ def test_chunk_ids_are_content_addressed() -> None:
     """Re-ingesting an unchanged document is a no-op, which is what makes
     indexing on every push affordable."""
     document = parse_document(CORPUS / "runbooks/alert-flapping.md", CORPUS)
-    assert [c.id for c in chunk_document(document)] == [
-        c.id for c in chunk_document(document)
-    ]
+    assert [c.id for c in chunk_document(document)] == [c.id for c in chunk_document(document)]
 
 
 def test_every_child_is_within_the_size_budget_unless_it_is_a_procedure() -> None:
@@ -145,9 +143,7 @@ async def test_dense_index_ranks_by_cosine() -> None:
     embedder = HashEmbedder()
     index = DenseIndex()
     texts = {"oom": "pods OOMKilled memory limit", "deploy": "roll back the deployment"}
-    for doc_id, vector in zip(
-        texts, await embedder.embed(list(texts.values())), strict=True
-    ):
+    for doc_id, vector in zip(texts, await embedder.embed(list(texts.values())), strict=True):
         index.add(doc_id, vector)
 
     query = (await embedder.embed(["pods OOMKilled memory limit"]))[0]
